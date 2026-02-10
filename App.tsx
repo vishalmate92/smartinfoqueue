@@ -159,7 +159,7 @@ const App: React.FC = () => {
             <input 
               type="text"
               placeholder="Search manually..."
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 pr-10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 pr-10 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm text-slate-900"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && searchLocation(searchQuery)}
@@ -367,7 +367,7 @@ const App: React.FC = () => {
             <div className="flex gap-2">
               <input 
                 type="text"
-                className="flex-1 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="flex-1 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900"
                 placeholder="Type your question..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
