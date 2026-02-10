@@ -1,0 +1,7 @@
+{
+  "name": "SmartInfoQueue",
+  "description": "Convert idle waiting time at public service places into an engaging, educational experience with AI-generated quizzes and location-based insights.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
