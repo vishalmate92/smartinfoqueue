@@ -17,6 +17,8 @@ const App: React.FC = () => {
   const [isDeepThinking, setIsDeepThinking] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showMap, setShowMap] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastAttempt, setLastAttempt] = useState<(() => void) | null>(null);
 
   useEffect(() => {
     const cachedLoc = localStorage.getItem('s_location');
@@ -24,20 +26,55 @@ const App: React.FC = () => {
     const cachedQuiz = localStorage.getItem('s_quiz');
     
     if (cachedLoc) {
-      const loc = JSON.parse(cachedLoc);
-      setLocation(loc);
-      if (cachedInfo) setInfo(JSON.parse(cachedInfo));
-      if (cachedQuiz) setQuiz(JSON.parse(cachedQuiz));
+      try {
+        const loc = JSON.parse(cachedLoc);
+        setLocation(loc);
+        if (cachedInfo) setInfo(JSON.parse(cachedInfo));
+        if (cachedQuiz) setQuiz(JSON.parse(cachedQuiz));
+      } catch (e) {
+        detectLocation();
+      }
     } else {
       detectLocation();
     }
   }, []);
 
+  const fetchWithRetry = async (url: string, options: RequestInit = {}, retries = 2, backoff = 1000): Promise<Response> => {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          ...options.headers,
+          'Accept-Language': 'en',
+          // Note: Browser fetch might not allow setting User-Agent, but adding a custom identifying header sometimes helps with some CDNs.
+          'X-Requested-With': 'SmartInfoQueue-App'
+        }
+      });
+      if (!response.ok) {
+        if (response.status === 429 && retries > 0) {
+          await new Promise(resolve => setTimeout(resolve, backoff));
+          return fetchWithRetry(url, options, retries - 1, backoff * 2);
+        }
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      return response;
+    } catch (error) {
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        return fetchWithRetry(url, options, retries - 1, backoff * 2);
+      }
+      throw error;
+    }
+  };
+
   const reverseGeocode = async (lat: number, lon: number) => {
     setIsLoading(true);
+    setErrorMessage(null);
+    setLastAttempt(() => () => reverseGeocode(lat, lon));
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+      const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
       const data = await res.json();
+      
       const newLoc: LocationData = {
         lat,
         lon,
@@ -45,15 +82,18 @@ const App: React.FC = () => {
         type: data.type || data.category || 'Public Place',
         name: data.name || data.address.bank || data.address.hospital || data.address.university || data.address.amenity || data.address.office || 'Current Location'
       };
-      updateLocationState(newLoc);
+      await updateLocationState(newLoc);
     } catch (e) {
       console.error("Geocoding failed", e);
+      setErrorMessage("Could not detect your location details. The service might be temporarily unavailable. Please try again or search manually.");
       setIsLoading(false);
     }
   };
 
   const detectLocation = () => {
     setIsLoading(true);
+    setErrorMessage(null);
+    setLastAttempt(() => detectLocation);
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -61,20 +101,26 @@ const App: React.FC = () => {
         },
         (err) => {
           console.error(err);
+          setErrorMessage("Location access denied or unavailable. Please enable GPS or search for your location manually.");
           setIsLoading(false);
-        }
+        },
+        { timeout: 10000, enableHighAccuracy: true }
       );
     } else {
+      setErrorMessage("Geolocation is not supported by your browser.");
       setIsLoading(false);
     }
   };
 
   const searchLocation = async (q: string) => {
-    if (!q) return;
+    if (!q.trim()) return;
     setIsLoading(true);
+    setErrorMessage(null);
+    setLastAttempt(() => () => searchLocation(q));
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`);
+      const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`);
       const data = await res.json();
+      
       if (data && data[0]) {
         const item = data[0];
         const newLoc: LocationData = {
@@ -84,10 +130,13 @@ const App: React.FC = () => {
           type: item.type || 'Location',
           name: item.display_name.split(',')[0]
         };
-        updateLocationState(newLoc);
+        await updateLocationState(newLoc);
+      } else {
+        setErrorMessage("No places found for that search query. Try being more specific.");
       }
     } catch (e) {
       console.error("Search failed", e);
+      setErrorMessage("Search failed due to a connection issue. Please check your internet and try again.");
     } finally {
       setIsLoading(false);
     }
@@ -109,6 +158,7 @@ const App: React.FC = () => {
       localStorage.setItem('s_quiz', JSON.stringify(newQuiz));
     } catch (e) {
       console.error("AI fetch failed", e);
+      setErrorMessage("Connected to location, but failed to load AI insights. You can still use the assistant.");
     } finally {
       setIsLoading(false);
     }
@@ -135,13 +185,41 @@ const App: React.FC = () => {
       setChatHistory(prev => {
         const next = [...prev];
         next.pop();
-        return [...next, { role: 'model', text: "Sorry, I had trouble connecting." }];
+        return [...next, { role: 'model', text: "Sorry, I'm having trouble connecting to my brain right now. Please try again." }];
       });
     }
   };
 
   const renderHome = () => (
     <div className="p-6 space-y-6">
+      {errorMessage && (
+        <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 flex items-start gap-3 animate-in slide-in-from-top duration-300 shadow-sm">
+          <i className="fa-solid fa-circle-exclamation text-rose-500 mt-1"></i>
+          <div className="flex-1">
+            <p className="text-sm text-rose-700 font-medium leading-snug">{errorMessage}</p>
+            <div className="flex gap-4 mt-2">
+              {lastAttempt && (
+                <button 
+                  onClick={() => {
+                    setErrorMessage(null);
+                    lastAttempt();
+                  }} 
+                  className="text-[10px] uppercase font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                >
+                  <i className="fa-solid fa-rotate-right"></i> Retry
+                </button>
+              )}
+              <button 
+                onClick={() => setErrorMessage(null)} 
+                className="text-[10px] uppercase font-bold text-slate-400 hover:text-slate-600"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <section className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm">
         <div className="flex items-center gap-4 mb-5">
           <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
@@ -192,7 +270,8 @@ const App: React.FC = () => {
       <div className="grid grid-cols-1 gap-4">
         <button 
           onClick={() => setActiveScreen(AppScreen.INFO)}
-          className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4 text-left active:scale-[0.98] transition-all group"
+          disabled={!location}
+          className={`bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4 text-left active:scale-[0.98] transition-all group ${!location ? 'opacity-50 grayscale' : ''}`}
         >
           <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center text-amber-600 group-hover:bg-amber-600 group-hover:text-white transition-colors">
             <i className="fa-solid fa-circle-info text-xl"></i>
@@ -206,7 +285,8 @@ const App: React.FC = () => {
 
         <button 
           onClick={() => setActiveScreen(AppScreen.QUIZ)}
-          className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4 text-left active:scale-[0.98] transition-all group"
+          disabled={!location || quiz.length === 0}
+          className={`bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4 text-left active:scale-[0.98] transition-all group ${(!location || quiz.length === 0) ? 'opacity-50 grayscale' : ''}`}
         >
           <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
             <i className="fa-solid fa-lightbulb text-xl"></i>
@@ -236,7 +316,7 @@ const App: React.FC = () => {
       {isLoading && (
         <div className="fixed inset-0 bg-white/70 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
           <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-          <p className="text-indigo-600 font-black uppercase tracking-widest text-xs animate-pulse">Analyzing Location...</p>
+          <p className="text-indigo-600 font-black uppercase tracking-widest text-xs animate-pulse">Processing Request...</p>
         </div>
       )}
     </div>
@@ -268,7 +348,9 @@ const App: React.FC = () => {
           </div>
 
           <div className="prose prose-slate max-w-none text-slate-600 space-y-4">
-            {info.text.split('\n').map((line, i) => (
+            {!info.text ? (
+               <div className="py-10 text-center text-slate-400 italic">No information loaded.</div>
+            ) : info.text.split('\n').map((line, i) => (
               <p key={i} className={line.startsWith('#') ? 'font-bold text-slate-800' : ''}>
                 {line.replace(/^#+ /, '')}
               </p>
