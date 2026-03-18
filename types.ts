@@ -5,6 +5,10 @@ export interface LocationData {
   displayName: string;
   type?: string;
   name?: string;
+  openingHours?: string;
+  phone?: string;
+  website?: string;
+  rating?: string;
 }
 
 export interface QuizQuestion {
@@ -27,4 +31,22 @@ export enum AppScreen {
   INFO = 'INFO',
   CHAT = 'CHAT',
   MAP = 'MAP'
+}
+
+export enum AppErrorType {
+  NETWORK = 'NETWORK',
+  RATE_LIMIT = 'RATE_LIMIT',
+  GEOLOCATION_DENIED = 'GEOLOCATION_DENIED',
+  GEOLOCATION_UNAVAILABLE = 'GEOLOCATION_UNAVAILABLE',
+  GEOLOCATION_TIMEOUT = 'GEOLOCATION_TIMEOUT',
+  NOT_FOUND = 'NOT_FOUND',
+  AI_FAILURE = 'AI_FAILURE',
+  UNKNOWN = 'UNKNOWN'
+}
+
+export class AppError extends Error {
+  constructor(public type: AppErrorType, message: string) {
+    super(message);
+    this.name = 'AppError';
+  }
 }

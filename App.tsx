@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import Layout from './components/Layout';
 import QuizModule from './components/QuizModule';
 import MapPicker from './components/MapPicker';
-import { LocationData, QuizQuestion, ChatMessage, AppScreen } from './types';
+import { LocationData, QuizQuestion, ChatMessage, AppScreen, AppError, AppErrorType } from './types';
 import { getPlaceInfo, generateQuiz, chatWithAI, PlaceInfoResponse } from './services/geminiService';
 
 const App: React.FC = () => {
@@ -45,26 +45,52 @@ const App: React.FC = () => {
         ...options,
         headers: {
           ...options.headers,
-          'Accept-Language': 'en',
-          // Note: Browser fetch might not allow setting User-Agent, but adding a custom identifying header sometimes helps with some CDNs.
-          'X-Requested-With': 'SmartInfoQueue-App'
+          'Accept-Language': 'en'
         }
       });
       if (!response.ok) {
-        if (response.status === 429 && retries > 0) {
-          await new Promise(resolve => setTimeout(resolve, backoff));
-          return fetchWithRetry(url, options, retries - 1, backoff * 2);
+        if (response.status === 429) {
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, backoff));
+            return fetchWithRetry(url, options, retries - 1, backoff * 2);
+          }
+          throw new AppError(AppErrorType.RATE_LIMIT, "Rate limit exceeded");
         }
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new AppError(AppErrorType.NETWORK, `HTTP error! status: ${response.status}`);
       }
       return response;
     } catch (error) {
+      if (error instanceof AppError) throw error;
       if (retries > 0) {
         await new Promise(resolve => setTimeout(resolve, backoff));
         return fetchWithRetry(url, options, retries - 1, backoff * 2);
       }
-      throw error;
+      throw new AppError(AppErrorType.NETWORK, error instanceof Error ? error.message : "Network request failed");
     }
+  };
+
+  const getErrorMessage = (error: any): string => {
+    if (error instanceof AppError) {
+      switch (error.type) {
+        case AppErrorType.NETWORK:
+          return "Connection issue. The service might be temporarily unavailable or your internet is weak.";
+        case AppErrorType.RATE_LIMIT:
+          return "Too many requests. Please wait a moment and try again.";
+        case AppErrorType.GEOLOCATION_DENIED:
+          return "Location access denied. Please enable GPS in your browser settings.";
+        case AppErrorType.GEOLOCATION_UNAVAILABLE:
+          return "Location unavailable. The device could not determine your position.";
+        case AppErrorType.GEOLOCATION_TIMEOUT:
+          return "Location request timed out. Please try again or search manually.";
+        case AppErrorType.NOT_FOUND:
+          return "No places found for that search query. Try being more specific.";
+        case AppErrorType.AI_FAILURE:
+          return "Connected to location, but failed to load AI insights. You can still use the assistant.";
+        default:
+          return error.message || "An unexpected error occurred.";
+      }
+    }
+    return error.message || "An unexpected error occurred.";
   };
 
   const reverseGeocode = async (lat: number, lon: number) => {
@@ -72,20 +98,33 @@ const App: React.FC = () => {
     setErrorMessage(null);
     setLastAttempt(() => () => reverseGeocode(lat, lon));
     try {
-      const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
-      const data = await res.json();
+      let data;
+      try {
+        const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1&extratags=1`);
+        data = await res.json();
+      } catch (e) {
+        console.warn("Nominatim failed, trying fallback", e);
+        const res = await fetchWithRetry(`https://geocode.maps.co/reverse?lat=${lat}&lon=${lon}`);
+        data = await res.json();
+      }
       
+      const extratags = data.extratags || {};
+      const address = data.address || {};
       const newLoc: LocationData = {
         lat,
         lon,
         displayName: data.display_name,
         type: data.type || data.category || 'Public Place',
-        name: data.name || data.address.bank || data.address.hospital || data.address.university || data.address.amenity || data.address.office || 'Current Location'
+        name: data.name || address.bank || address.hospital || address.university || address.amenity || address.office || address.road || 'Current Location',
+        openingHours: extratags.opening_hours,
+        phone: extratags.phone || extratags['contact:phone'],
+        website: extratags.website || extratags['contact:website'],
+        rating: extratags.rating
       };
       await updateLocationState(newLoc);
     } catch (e) {
       console.error("Geocoding failed", e);
-      setErrorMessage("Could not detect your location details. The service might be temporarily unavailable. Please try again or search manually.");
+      setErrorMessage(getErrorMessage(e));
       setIsLoading(false);
     }
   };
@@ -101,7 +140,11 @@ const App: React.FC = () => {
         },
         (err) => {
           console.error(err);
-          setErrorMessage("Location access denied or unavailable. Please enable GPS or search for your location manually.");
+          let type = AppErrorType.GEOLOCATION_UNAVAILABLE;
+          if (err.code === err.PERMISSION_DENIED) type = AppErrorType.GEOLOCATION_DENIED;
+          if (err.code === err.TIMEOUT) type = AppErrorType.GEOLOCATION_TIMEOUT;
+          
+          setErrorMessage(getErrorMessage(new AppError(type, err.message)));
           setIsLoading(false);
         },
         { timeout: 10000, enableHighAccuracy: true }
@@ -118,25 +161,37 @@ const App: React.FC = () => {
     setErrorMessage(null);
     setLastAttempt(() => () => searchLocation(q));
     try {
-      const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`);
-      const data = await res.json();
+      let data;
+      try {
+        const res = await fetchWithRetry(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&addressdetails=1&extratags=1`);
+        data = await res.json();
+      } catch (e) {
+        console.warn("Nominatim search failed, trying fallback", e);
+        const res = await fetchWithRetry(`https://geocode.maps.co/search?q=${encodeURIComponent(q)}`);
+        data = await res.json();
+      }
       
       if (data && data[0]) {
         const item = data[0];
+        const extratags = item.extratags || {};
         const newLoc: LocationData = {
           lat: parseFloat(item.lat),
           lon: parseFloat(item.lon),
           displayName: item.display_name,
           type: item.type || 'Location',
-          name: item.display_name.split(',')[0]
+          name: item.display_name.split(',')[0],
+          openingHours: extratags.opening_hours,
+          phone: extratags.phone || extratags['contact:phone'],
+          website: extratags.website || extratags['contact:website'],
+          rating: extratags.rating
         };
         await updateLocationState(newLoc);
       } else {
-        setErrorMessage("No places found for that search query. Try being more specific.");
+        setErrorMessage(getErrorMessage(new AppError(AppErrorType.NOT_FOUND, "No results")));
       }
     } catch (e) {
       console.error("Search failed", e);
-      setErrorMessage("Search failed due to a connection issue. Please check your internet and try again.");
+      setErrorMessage(getErrorMessage(e));
     } finally {
       setIsLoading(false);
     }
@@ -158,7 +213,7 @@ const App: React.FC = () => {
       localStorage.setItem('s_quiz', JSON.stringify(newQuiz));
     } catch (e) {
       console.error("AI fetch failed", e);
-      setErrorMessage("Connected to location, but failed to load AI insights. You can still use the assistant.");
+      setErrorMessage(getErrorMessage(new AppError(AppErrorType.AI_FAILURE, "AI processing failed")));
     } finally {
       setIsLoading(false);
     }
@@ -185,7 +240,7 @@ const App: React.FC = () => {
       setChatHistory(prev => {
         const next = [...prev];
         next.pop();
-        return [...next, { role: 'model', text: "Sorry, I'm having trouble connecting to my brain right now. Please try again." }];
+        return [...next, { role: 'model', text: `Error: ${getErrorMessage(e)}` }];
       });
     }
   };
@@ -231,6 +286,62 @@ const App: React.FC = () => {
             <p className="text-xs text-indigo-500 font-semibold">{location?.type || 'Searching place type...'}</p>
           </div>
         </div>
+
+        {location && (location.openingHours || location.phone || location.website || location.rating) && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 p-4 bg-slate-50 rounded-xl border border-slate-100">
+            {location.openingHours && (
+              <div className="flex items-start gap-3">
+                <div className="w-7 h-7 bg-white rounded-lg flex items-center justify-center text-slate-400 shadow-sm border border-slate-100">
+                  <i className="fa-solid fa-clock text-xs"></i>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Hours</p>
+                  <p className="text-xs text-slate-600 font-medium line-clamp-2">{location.openingHours}</p>
+                </div>
+              </div>
+            )}
+            {location.phone && (
+              <div className="flex items-start gap-3">
+                <div className="w-7 h-7 bg-white rounded-lg flex items-center justify-center text-slate-400 shadow-sm border border-slate-100">
+                  <i className="fa-solid fa-phone text-xs"></i>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Phone</p>
+                  <p className="text-xs text-slate-600 font-medium">{location.phone}</p>
+                </div>
+              </div>
+            )}
+            {location.website && (
+              <div className="flex items-start gap-3">
+                <div className="w-7 h-7 bg-white rounded-lg flex items-center justify-center text-slate-400 shadow-sm border border-slate-100">
+                  <i className="fa-solid fa-globe text-xs"></i>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Website</p>
+                  <a 
+                    href={location.website.startsWith('http') ? location.website : `https://${location.website}`} 
+                    target="_blank" 
+                    rel="noopener noreferrer" 
+                    className="text-xs text-indigo-600 font-bold hover:underline truncate block"
+                  >
+                    {location.website.replace(/^https?:\/\/(www\.)?/, '')}
+                  </a>
+                </div>
+              </div>
+            )}
+            {location.rating && (
+              <div className="flex items-start gap-3">
+                <div className="w-7 h-7 bg-white rounded-lg flex items-center justify-center text-amber-400 shadow-sm border border-slate-100">
+                  <i className="fa-solid fa-star text-xs"></i>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Rating</p>
+                  <p className="text-xs text-slate-600 font-medium">{location.rating} / 5</p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex gap-2">
           <div className="relative flex-1">
