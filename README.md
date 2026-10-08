@@ -1,7 +1,7 @@
 
 # 📱 SmartInfoQueue
 
-**Mobile-Based Location-Activated Information & Engagement System for Public Service Visitors**
+**Location-Based Activated Information & Engagement System for Public Service Visitors**
 
 ---
 
